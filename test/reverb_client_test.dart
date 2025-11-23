@@ -90,6 +90,20 @@ void main() {
       verify(mockSink.close()).called(1);
     });
 
+    test('responds to server pings to keep the connection alive', () async {
+      // Arrange
+      final client = createClient();
+
+      // Act
+      await client.connect();
+      streamController.add(jsonEncode({'event': 'pusher:ping', 'data': '{}'}));
+
+      // Assert
+      await Future.delayed(Duration.zero);
+      verify(mockSink.add(jsonEncode({'event': 'pusher:pong'}))).called(1);
+      client.disconnect();
+    });
+
     group('wsPath configuration', () {
       test('uses default path when wsPath is not provided', () async {
         // Arrange

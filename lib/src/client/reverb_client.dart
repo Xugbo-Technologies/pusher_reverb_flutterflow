@@ -721,6 +721,12 @@ class ReverbClient {
     }
   }
 
+  /// Responds to server ping events to keep the connection alive.
+  void _respondToPing() {
+    final pongPayload = jsonEncode({'event': 'pusher:pong'});
+    _sendMessage(pongPayload);
+  }
+
   void _handleMessage(dynamic message) {
     final decodedMessage = jsonDecode(message as String);
     final event = decodedMessage['event'];
@@ -752,6 +758,8 @@ class ReverbClient {
         final channel = _channels[channelName];
         channel?.handleUnsubscriptionSucceeded();
       }
+    } else if (event == 'pusher:ping') {
+      _respondToPing();
     } else {
       // Handle channel events
       final channelName = decodedMessage['channel'] as String?;
