@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mockito/annotations.dart';
@@ -101,6 +102,71 @@ void main() {
       // Assert
       await Future.delayed(Duration.zero);
       verify(mockSink.add(jsonEncode({'event': 'pusher:pong'}))).called(1);
+      client.disconnect();
+    });
+
+    test('re-subscribes private channels with updated socket ID after reconnection', () async {
+      // Arrange
+      final authRequests = <Map<String, dynamic>>[];
+      final firstAuthRequest = Completer<void>();
+      final secondAuthRequest = Completer<void>();
+      final server = await HttpServer.bind('localhost', 0);
+      addTearDown(() => server.close(force: true));
+      server.listen((HttpRequest request) async {
+        final body = await utf8.decoder.bind(request).join();
+        authRequests.add(jsonDecode(body) as Map<String, dynamic>);
+        request.response.statusCode = 200;
+        request.response.headers.contentType = ContentType.json;
+        request.response.write(jsonEncode({'auth': 'test-auth'}));
+        await request.response.close();
+        if (!firstAuthRequest.isCompleted) {
+          firstAuthRequest.complete();
+        } else if (!secondAuthRequest.isCompleted) {
+          secondAuthRequest.complete();
+        }
+      });
+
+      final client = ReverbClient.forTesting(
+        host: 'localhost',
+        port: 8080,
+        appKey: 'app-key',
+        authorizer: (channelName, socketId) async => {'Authorization': 'Bearer token'},
+        authEndpoint: 'http://localhost:${server.port}',
+        channelFactory: (_) => mockChannel,
+      );
+
+      await client.connect();
+      final initialConnectionMessage = jsonEncode({
+        'event': 'pusher:connection_established',
+        'data': jsonEncode({'socket_id': 'socket-1', 'activity_timeout': 30}),
+      });
+      streamController.add(initialConnectionMessage);
+      await Future.delayed(Duration.zero);
+
+      client.subscribeToPrivateChannel('private-chat');
+      await firstAuthRequest.future;
+      await Future.delayed(Duration(milliseconds: 10));
+      final subscriptionMessage = jsonEncode({
+        'event': 'pusher_internal:subscription_succeeded',
+        'data': jsonEncode({'channel': 'private-chat'}),
+      });
+      streamController.add(subscriptionMessage);
+      await Future.delayed(Duration.zero);
+
+      final reconnectMessage = jsonEncode({
+        'event': 'pusher:connection_established',
+        'data': jsonEncode({'socket_id': 'socket-2', 'activity_timeout': 30}),
+      });
+      streamController.add(reconnectMessage);
+      await secondAuthRequest.future;
+      await Future.delayed(Duration(milliseconds: 10));
+
+      // Assert
+      expect(authRequests.length, 2);
+      expect(authRequests[0]['socket_id'], 'socket-1');
+      expect(authRequests[1]['socket_id'], 'socket-2');
+      final capturedMessages = verify(mockSink.add(captureAny)).captured.whereType<String>().where((message) => message.contains('"channel":"private-chat"')).toList();
+      expect(capturedMessages.length, 2);
       client.disconnect();
     });
 

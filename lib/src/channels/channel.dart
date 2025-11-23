@@ -237,6 +237,15 @@ class Channel {
     _eventStreamController.close();
   }
 
+  /// Resets the channel state so it can re-subscribe after a reconnect.
+  ///
+  /// This is used internally by [ReverbClient] when the underlying WebSocket
+  /// connection is re-established.
+  @internal
+  void resetForReconnection() {
+    _setState(ChannelState.unsubscribed);
+  }
+
   /// Sets the channel state and notifies listeners.
   void _setState(ChannelState newState) {
     if (_state != newState) {

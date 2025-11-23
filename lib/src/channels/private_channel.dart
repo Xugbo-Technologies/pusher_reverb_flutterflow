@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
+import 'package:meta/meta.dart';
 
 import '../auth/authorizer.dart';
 import '../models/exceptions.dart';
@@ -20,7 +21,10 @@ class PrivateChannel extends Channel {
   final String authEndpoint;
 
   /// The socket ID used for authentication.
-  final String socketId;
+  String _socketId;
+
+  /// Latest socket ID assigned by the server.
+  String get socketId => _socketId;
 
   /// Creates a new PrivateChannel instance.
   ///
@@ -29,7 +33,7 @@ class PrivateChannel extends Channel {
   /// [authEndpoint] The URL endpoint for authentication requests.
   /// [socketId] The socket ID for authentication.
   /// [sendMessage] Callback for sending WebSocket messages.
-  PrivateChannel({required super.name, required this.authorizer, required this.authEndpoint, required this.socketId, required super.sendMessage}) {
+  PrivateChannel({required super.name, required this.authorizer, required this.authEndpoint, required String socketId, required super.sendMessage}) : _socketId = socketId {
     // Only validate if this is actually a PrivateChannel, not a subclass
     if (runtimeType == PrivateChannel) {
       validatePrivateChannelName(name);
@@ -135,5 +139,11 @@ class PrivateChannel extends Channel {
   /// Encodes a message to JSON string.
   String _encodeMessage(Map<String, dynamic> message) {
     return jsonEncode(message);
+  }
+
+  /// Updates the socket ID to the latest value when reconnecting.
+  @internal
+  void updateSocketId(String newSocketId) {
+    _socketId = newSocketId;
   }
 }

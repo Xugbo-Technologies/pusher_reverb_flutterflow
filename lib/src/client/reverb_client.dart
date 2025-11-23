@@ -721,6 +721,25 @@ class ReverbClient {
     }
   }
 
+  /// Attempts to resubscribe to channels after a reconnection or handshake.
+  void _resubscribeToChannels() {
+    if (_channels.isEmpty || socketId == null) {
+      return;
+    }
+
+    final currentSocketId = socketId!;
+    for (final channel in _channels.values) {
+      final currentState = channel.state;
+      if (currentState == ChannelState.subscribed || currentState == ChannelState.subscribing) {
+        if (channel is PrivateChannel) {
+          channel.updateSocketId(currentSocketId);
+        }
+        channel.resetForReconnection();
+        channel.subscribe();
+      }
+    }
+  }
+
   /// Responds to server ping events to keep the connection alive.
   void _respondToPing() {
     final pongPayload = jsonEncode({'event': 'pusher:pong'});
@@ -739,6 +758,7 @@ class ReverbClient {
       _reconnectAttempts = 0;
       _setConnectionState(ConnectionState.connected);
       onConnected?.call(socketId);
+      _resubscribeToChannels();
     } else if (event == 'pusher_internal:subscription_succeeded') {
       final channelData = jsonDecode(data as String);
       final channelName = channelData['channel'] as String?;
