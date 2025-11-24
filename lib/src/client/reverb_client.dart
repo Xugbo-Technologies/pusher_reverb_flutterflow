@@ -538,7 +538,9 @@ class ReverbClient {
   /// Subscribes to a public channel.
   Channel subscribeToChannel(String channelName) {
     if (_channels.containsKey(channelName)) {
-      return _channels[channelName]!;
+      final existingChannel = _channels[channelName]!;
+      _reactivateChannelIfNeeded(existingChannel);
+      return existingChannel;
     }
 
     final channel = Channel(name: channelName, sendMessage: _sendMessage);
@@ -562,6 +564,7 @@ class ReverbClient {
     if (_channels.containsKey(channelName)) {
       final existingChannel = _channels[channelName]!;
       if (existingChannel is PrivateChannel) {
+        _reactivatePrivateChannelIfNeeded(existingChannel);
         return existingChannel;
       } else {
         throw ChannelException('Channel already exists as a different channel type. Cannot convert to private channel', channelName: channelName);
@@ -603,6 +606,7 @@ class ReverbClient {
     if (_channels.containsKey(channelName)) {
       final existingChannel = _channels[channelName]!;
       if (existingChannel is PresenceChannel) {
+        _reactivatePrivateChannelIfNeeded(existingChannel);
         return existingChannel;
       } else {
         throw ChannelException('Channel already exists as a different channel type. Cannot convert to presence channel', channelName: channelName);
@@ -719,6 +723,25 @@ class ReverbClient {
     if (_channel != null) {
       _channel!.sink.add(message);
     }
+  }
+
+  /// Re-activates a channel if it was unsubscribed or unsubscribing.
+  void _reactivateChannelIfNeeded(Channel channel) {
+    if (channel.state == ChannelState.unsubscribed) {
+      channel.subscribe();
+    } else if (channel.state == ChannelState.unsubscribing) {
+      channel.resetForReconnection();
+      channel.subscribe();
+    }
+  }
+
+  /// Re-activates a private channel (including presence/encrypted) when needed.
+  void _reactivatePrivateChannelIfNeeded(PrivateChannel channel) {
+    if (socketId == null) {
+      throw ConnectionException('Cannot subscribe to channel: not connected to server');
+    }
+    channel.updateSocketId(socketId!);
+    _reactivateChannelIfNeeded(channel);
   }
 
   /// Attempts to resubscribe to channels after a reconnection or handshake.

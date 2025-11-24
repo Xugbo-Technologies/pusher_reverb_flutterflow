@@ -221,7 +221,6 @@ class Channel {
   /// Handles unsubscription confirmation.
   void handleUnsubscriptionSucceeded() {
     _setState(ChannelState.unsubscribed);
-    _clearEventListeners();
   }
 
   /// Clears all event listeners and closes the event stream controller.
@@ -234,6 +233,7 @@ class Channel {
   /// This method should be called when the channel is being disposed
   /// to prevent memory leaks.
   void dispose() {
+    _clearEventListeners();
     _eventStreamController.close();
   }
 

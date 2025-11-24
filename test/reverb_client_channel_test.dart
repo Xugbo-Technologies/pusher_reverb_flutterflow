@@ -95,6 +95,51 @@ void main() {
         await Future.delayed(Duration.zero);
         expect(channel.state, ChannelState.subscribed);
       });
+
+      test('re-subscribes existing channel after unsubscription and keeps listeners', () async {
+        // Arrange
+        await client.connect();
+        final channel = client.subscribeToChannel('test-channel');
+        final events = <String>[];
+        channel.bind('test-event', (event, data) {
+          events.add('$event:$data');
+        });
+        final subscriptionMessage = jsonEncode({
+          'event': 'pusher_internal:subscription_succeeded',
+          'data': jsonEncode({'channel': 'test-channel'}),
+        });
+        streamController.add(subscriptionMessage);
+        await Future.delayed(Duration.zero);
+
+        final unsubscriptionMessage = jsonEncode({
+          'event': 'pusher_internal:unsubscription_succeeded',
+          'data': jsonEncode({'channel': 'test-channel'}),
+        });
+        streamController.add(unsubscriptionMessage);
+        await Future.delayed(Duration.zero);
+        expect(channel.state, ChannelState.unsubscribed);
+
+        clearInteractions(mockSink);
+
+        // Act
+        final sameChannel = client.subscribeToChannel('test-channel');
+
+        // Assert
+        expect(sameChannel, same(channel));
+        final capturedMessages = verify(mockSink.add(captureAny)).captured;
+        expect(capturedMessages.length, 1);
+        final message = jsonDecode(capturedMessages.first as String);
+        expect(message['event'], 'pusher:subscribe');
+        expect(message['data']['channel'], 'test-channel');
+
+        // Ensure listeners still receive events
+        streamController.add(subscriptionMessage);
+        await Future.delayed(Duration.zero);
+        final testEventMessage = jsonEncode({'event': 'test-event', 'channel': 'test-channel', 'data': 'payload'});
+        streamController.add(testEventMessage);
+        await Future.delayed(Duration.zero);
+        expect(events, contains('test-event:payload'));
+      });
     });
 
     group('Channel Unsubscription', () {
