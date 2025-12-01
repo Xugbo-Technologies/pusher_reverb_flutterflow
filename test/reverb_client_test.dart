@@ -477,18 +477,51 @@ void main() {
         expect(instance2.appKey, 'new-key');
       });
 
-      test('instance() ignores parameters after first initialization', () {
+      test('instance() reinitializes when configuration changes', () {
         // Arrange
         final instance1 = ReverbClient.instance(host: 'localhost', port: 8080, appKey: 'first-key', channelFactory: (_) => mockChannel);
 
         // Act - Call with different parameters
-        final instance2 = ReverbClient.instance(host: 'different', port: 9090, appKey: 'second-key');
+        final instance2 = ReverbClient.instance(host: 'different', port: 9090, appKey: 'second-key', channelFactory: (_) => mockChannel);
 
-        // Assert - Should return same instance with original parameters
-        expect(identical(instance1, instance2), isTrue);
-        expect(instance2.appKey, 'first-key');
-        expect(instance2.host, 'localhost');
-        expect(instance2.port, 8080);
+        // Assert - Should return a new instance reflecting the latest config
+        expect(identical(instance1, instance2), isFalse);
+        expect(instance2.appKey, 'second-key');
+        expect(instance2.host, 'different');
+        expect(instance2.port, 9090);
+      });
+
+      test('instance() reinitializes when auth callbacks change', () {
+        // Arrange
+        void onConnected1(String? _) {}
+        final authorizer1 = (String channel, String socketId) async => {'a': 'b'};
+        final instance1 = ReverbClient.instance(
+          host: 'localhost',
+          port: 8080,
+          appKey: 'first-key',
+          onConnected: onConnected1,
+          authorizer: authorizer1,
+          authEndpoint: '/old',
+          channelFactory: (_) => mockChannel,
+        );
+
+        // Act - Provide a new callback and authorizer
+        void onConnected2(String? _) {}
+        final authorizer2 = (String channel, String socketId) async => {'c': 'd'};
+        final instance2 = ReverbClient.instance(
+          host: 'localhost',
+          port: 8080,
+          appKey: 'first-key',
+          onConnected: onConnected2,
+          authorizer: authorizer2,
+          authEndpoint: '/new',
+          channelFactory: (_) => mockChannel,
+        );
+
+        // Assert
+        expect(identical(instance1, instance2), isFalse);
+        expect(instance2.authEndpoint, '/new');
+        expect(instance2.onConnected, same(onConnected2));
       });
     });
 

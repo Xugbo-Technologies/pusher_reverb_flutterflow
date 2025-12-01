@@ -228,6 +228,36 @@ class ReverbClient {
     void Function(dynamic error)? onError,
     WebSocketChannel Function(Uri uri)? channelFactory,
   }) {
+    if (_instance != null) {
+      final shouldReplace = _shouldReplaceInstance(
+        existing: _instance!,
+        host: host,
+        port: port,
+        appKey: appKey,
+        apiKey: apiKey,
+        cluster: cluster,
+        authorizer: authorizer,
+        authEndpoint: authEndpoint,
+        wsPath: wsPath,
+        useTLS: useTLS,
+        onConnecting: onConnecting,
+        onConnected: onConnected,
+        onReconnecting: onReconnecting,
+        onDisconnected: onDisconnected,
+        onError: onError,
+        channelFactory: channelFactory,
+      );
+
+      if (!shouldReplace) {
+        return _instance!;
+      }
+
+      // Tear down the existing client so a fresh configuration can be applied.
+      _instance!.disconnect();
+      _instance!._connectionStateController.close();
+      _instance = null;
+    }
+
     if (_instance == null) {
       if (host == null || port == null || appKey == null) {
         throw StateError(
@@ -254,6 +284,51 @@ class ReverbClient {
       );
     }
     return _instance!;
+  }
+
+  /// Determines whether the existing singleton should be replaced due to configuration changes.
+  static bool _shouldReplaceInstance({
+    required ReverbClient existing,
+    String? host,
+    int? port,
+    String? appKey,
+    String? apiKey,
+    String? cluster,
+    Authorizer? authorizer,
+    String? authEndpoint,
+    String? wsPath,
+    bool? useTLS,
+    void Function()? onConnecting,
+    void Function(String? socketId)? onConnected,
+    void Function()? onReconnecting,
+    void Function()? onDisconnected,
+    void Function(dynamic error)? onError,
+    WebSocketChannel Function(Uri uri)? channelFactory,
+  }) {
+    // If core connection settings change, we must recreate the client.
+    if ((host != null && host != existing.host) ||
+        (port != null && port != existing.port) ||
+        (appKey != null && appKey != existing.appKey) ||
+        (cluster != null && cluster != existing.cluster) ||
+        (wsPath != null && wsPath != existing.wsPath) ||
+        (useTLS != null && useTLS != existing.useTLS) ||
+        (apiKey != null && apiKey != existing.apiKey)) {
+      return true;
+    }
+
+    // If auth or callbacks change (e.g. new token or UI context), rebuild so new hooks are used.
+    if ((authEndpoint != null && authEndpoint != existing.authEndpoint) ||
+        (authorizer != null && !identical(authorizer, existing.authorizer)) ||
+        (onConnecting != null && !identical(onConnecting, existing.onConnecting)) ||
+        (onConnected != null && !identical(onConnected, existing.onConnected)) ||
+        (onReconnecting != null && !identical(onReconnecting, existing.onReconnecting)) ||
+        (onDisconnected != null && !identical(onDisconnected, existing.onDisconnected)) ||
+        (onError != null && !identical(onError, existing.onError)) ||
+        (channelFactory != null && !identical(channelFactory, existing.channelFactory))) {
+      return true;
+    }
+
+    return false;
   }
 
   /// Factory constructor that throws an error to prevent direct instantiation.
