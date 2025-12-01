@@ -491,6 +491,17 @@ void main() {
         expect(instance2.port, 9090);
       });
 
+      test('instance() forceReplace always reinitializes even with same config', () {
+        // Arrange
+        final instance1 = ReverbClient.instance(host: 'localhost', port: 8080, appKey: 'first-key', channelFactory: (_) => mockChannel);
+
+        // Act - Call with same parameters but forceReplace
+        final instance2 = ReverbClient.instance(host: 'localhost', port: 8080, appKey: 'first-key', channelFactory: (_) => mockChannel, forceReplace: true);
+
+        // Assert - Should return a new instance
+        expect(identical(instance1, instance2), isFalse);
+      });
+
       test('instance() reinitializes when auth callbacks change', () {
         // Arrange
         void onConnected1(String? _) {}

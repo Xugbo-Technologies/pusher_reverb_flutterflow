@@ -227,6 +227,7 @@ class ReverbClient {
     void Function()? onDisconnected,
     void Function(dynamic error)? onError,
     WebSocketChannel Function(Uri uri)? channelFactory,
+    bool forceReplace = false,
   }) {
     if (_instance != null) {
       final shouldReplace = _shouldReplaceInstance(
@@ -248,7 +249,7 @@ class ReverbClient {
         channelFactory: channelFactory,
       );
 
-      if (!shouldReplace) {
+      if (!forceReplace && !shouldReplace) {
         return _instance!;
       }
 
@@ -593,6 +594,7 @@ class ReverbClient {
     // Mark this as a manual disconnect to prevent auto-reconnect
     _manualDisconnect = true;
     _reconnectAttempts = 0;
+    socketId = null;
 
     _subscription?.cancel();
     _channel?.sink.close();
