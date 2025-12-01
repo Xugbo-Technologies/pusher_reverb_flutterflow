@@ -446,6 +446,12 @@ class ReverbClient {
   /// Gets the resolved configuration (useful for debugging).
   ResolvedConfig get resolvedConfig => _resolvedConfig;
 
+  /// True when the underlying WebSocket is still open.
+  bool get _isSocketOpen => _channel != null && _channel!.closeCode == null;
+
+  /// True when the connection is established, socket is open, and a socket ID is present.
+  bool get isConnectionReady => _currentConnectionState == ConnectionState.connected && _isSocketOpen && socketId != null;
+
   /// Checks if the client is using a cluster configuration.
   bool get isUsingCluster => cluster != null;
 
@@ -797,9 +803,12 @@ class ReverbClient {
 
   /// Sends a message through the WebSocket channel.
   void _sendMessage(String message) {
-    if (_channel != null) {
-      _channel!.sink.add(message);
+    if (_channel == null || _channel!.closeCode != null) {
+      // Surface the issue to consumers but avoid throwing to keep call sites resilient.
+      onError?.call(ConnectionException('Cannot send message: not connected to server'));
+      return;
     }
+    _channel!.sink.add(message);
   }
 
   /// Re-activates a channel if it was unsubscribed or unsubscribing.
@@ -844,6 +853,46 @@ class ReverbClient {
   void _respondToPing() {
     final pongPayload = jsonEncode({'event': 'pusher:pong'});
     _sendMessage(pongPayload);
+  }
+
+  /// Ensures the client is connected, waiting up to [timeout] for a ready connection.
+  ///
+  /// This is useful for consumers that want to guard subscriptions against a silently
+  /// closed socket. It will reconnect if needed and wait until the socket is open,
+  /// the state is connected, and a socket ID is available.
+  Future<void> ensureConnected({Duration timeout = const Duration(seconds: 10)}) async {
+    if (isConnectionReady) {
+      return;
+    }
+
+    // If already connecting or reconnecting, just wait for completion.
+    if (_currentConnectionState != ConnectionState.connecting && _currentConnectionState != ConnectionState.reconnecting) {
+      await connect();
+    }
+
+    final completer = Completer<void>();
+    late StreamSubscription<ConnectionState> sub;
+
+    void completeIfReady(ConnectionState state) {
+      if (state == ConnectionState.connected && isConnectionReady) {
+        completer.complete();
+      } else if (state == ConnectionState.error) {
+        completer.completeError(ConnectionException('Failed to connect to server'));
+      }
+    }
+
+    sub = onConnectionStateChange.listen(completeIfReady);
+    // Also check current state immediately in case we connected between checks.
+    completeIfReady(_currentConnectionState);
+
+    try {
+      await completer.future.timeout(
+        timeout,
+        onTimeout: () => throw ConnectionException('Timed out waiting for connection'),
+      );
+    } finally {
+      await sub.cancel();
+    }
   }
 
   void _handleMessage(dynamic message) {
