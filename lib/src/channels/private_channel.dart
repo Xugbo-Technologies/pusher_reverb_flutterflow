@@ -146,4 +146,62 @@ class PrivateChannel extends Channel {
   void updateSocketId(String newSocketId) {
     _socketId = newSocketId;
   }
+
+  /// Sends a client event (whisper) to other subscribed clients.
+  ///
+  /// Client events allow clients to send messages directly to other clients
+  /// without the message going through your backend server. These events
+  /// must have names starting with "client-".
+  ///
+  /// Perfect for ephemeral events like:
+  /// - Typing indicators (`client-typing`)
+  /// - Cursor positions (`client-cursor-moved`)
+  /// - Temporary UI state updates
+  ///
+  /// Example:
+  /// ```dart
+  /// // Send typing indicator
+  /// channel.whisper('client-typing', data: {
+  ///   'user_id': 'user123',
+  ///   'timestamp': DateTime.now().toIso8601String(),
+  /// });
+  /// ```
+  ///
+  /// Then listen for it on other clients:
+  /// ```dart
+  /// channel.on('client-typing').listen((event) {
+  ///   print('User ${event.data['user_id']} is typing...');
+  /// });
+  /// ```
+  ///
+  /// [eventName] The name of the event (must start with "client-").
+  /// [data] Optional data to send with the event.
+  ///
+  /// Throws [ChannelException] if the channel is not subscribed.
+  /// Throws [ArgumentError] if the event name doesn't start with "client-".
+  void whisper(String eventName, {Map<String, dynamic>? data}) {
+    // Validate event name
+    if (!eventName.startsWith('client-')) {
+      throw ArgumentError(
+        'Client event names must start with "client-". Got: $eventName',
+      );
+    }
+
+    // Ensure channel is subscribed
+    if (state != ChannelState.subscribed) {
+      throw ChannelException(
+        'Cannot send client event: channel is not subscribed',
+        channelName: name,
+      );
+    }
+
+    // Send the client event
+    final message = {
+      'event': eventName,
+      'channel': name,
+      'data': data ?? {},
+    };
+
+    sendMessage(_encodeMessage(message));
+  }
 }

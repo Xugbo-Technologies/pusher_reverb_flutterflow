@@ -7,6 +7,7 @@ import 'public_channel_screen.dart';
 import 'private_channel_screen.dart';
 import 'presence_channel_screen.dart';
 import 'encrypted_channel_screen.dart';
+import 'client_events_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -215,6 +216,18 @@ class _HomeScreenState extends State<HomeScreen> {
                 icon: Icons.enhanced_encryption,
                 color: Colors.purple,
                 onTap: () => _navigateToDemo(context, const EncryptedChannelScreen()),
+              ),
+
+              const SizedBox(height: 12),
+
+              ChannelDemoCard(
+                title: 'Client Events (Whisper)',
+                description:
+                    'Send client-to-client messages like typing indicators. '
+                    'Perfect for ephemeral real-time updates.',
+                icon: Icons.chat_bubble,
+                color: Colors.teal,
+                onTap: () => _navigateToDemo(context, const ClientEventsScreen()),
               ),
 
               const SizedBox(height: 32),

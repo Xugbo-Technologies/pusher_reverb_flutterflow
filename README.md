@@ -7,7 +7,9 @@ A Flutter/Dart client for Laravel Reverb, providing real-time WebSocket communic
 - 🔌 **WebSocket Connection** - Connect to Laravel Reverb servers with automatic reconnection
 - 📡 **Public Channels** - Subscribe to and receive events on public channels
 - 🔐 **Private Channels** - Secure private channel authentication with custom authorizers
+- 👥 **Presence Channels** - Track online members with member_added/member_removed events
 - 🔒 **Encrypted Channels** - End-to-end encryption for maximum security with AES-256-CBC
+- 💬 **Client Events (Whisper)** - Send client-to-client messages like typing indicators
 - 🎯 **Singleton Pattern** - Convenient singleton access with `ReverbClient.instance()`
 - 🌊 **Stream-Based API** - Idiomatic Dart streams for connection state and channel events
 - 🔄 **Backward Compatible** - Traditional callback-based API still supported
@@ -260,7 +262,137 @@ broadcast(new SecureMessageEvent($data))
     ->toOthers();
 ```
 
-### Example 6: Using StreamBuilder in Flutter Widgets
+### Example 6: Client Events (Whisper) - Typing Indicators
+
+Client events, also known as "whisper" events, allow clients to send messages directly to other subscribed clients without going through your backend server. They're perfect for ephemeral events like typing indicators, cursor positions, or temporary UI state updates.
+
+**Key Features:**
+- **Direct client-to-client messaging** - No backend processing required
+- **Only on private/presence channels** - Requires authentication
+- **Event names must start with "client-"** - e.g., `client-typing`
+- **Ephemeral** - Messages are not persisted or logged
+
+```dart
+// Initialize client with authorizer (required for private/presence channels)
+final client = ReverbClient.instance(
+  host: 'localhost',
+  port: 8080,
+  appKey: 'your-app-key',
+  authorizer: myAuthorizer,
+  authEndpoint: 'http://localhost:8000/broadcasting/auth',
+);
+
+await client.connect();
+
+// Subscribe to a presence channel
+final channel = client.subscribeToPresenceChannel('presence-chat-room');
+
+// Send a typing indicator (whisper)
+channel.whisper('client-typing', data: {
+  'user_id': 'user123',
+  'timestamp': DateTime.now().toIso8601String(),
+});
+
+// Listen for typing indicators from other users
+channel.on('client-typing').listen((event) {
+  final userId = event.data['user_id'];
+  print('$userId is typing...');
+
+  // Show typing indicator in your UI
+  // Hide it after 3 seconds of inactivity
+});
+```
+
+**FlutterFlow Implementation Example:**
+
+```dart
+// Custom Action: Send Typing Event (with throttling)
+import 'dart:async';
+
+Timer? _typingTimer;
+
+void sendTypingIndicator(String channelName, String userId) {
+  final client = ReverbClient.instance();
+  final channel = client.getChannel(channelName);
+
+  if (channel is PresenceChannel && channel.state == ChannelState.subscribed) {
+    // Cancel previous timer
+    _typingTimer?.cancel();
+
+    // Send typing event
+    channel.whisper('client-typing', data: {
+      'user_id': userId,
+      'timestamp': DateTime.now().toIso8601String(),
+    });
+
+    // Throttle to every 2 seconds
+    _typingTimer = Timer(Duration(seconds: 2), () {});
+  }
+}
+
+// Custom Action: Listen for Typing Events
+void listenForTyping(String channelName) {
+  final client = ReverbClient.instance();
+  final channel = client.getChannel(channelName);
+
+  if (channel != null) {
+    channel.on('client-typing').listen((event) {
+      final userId = event.data['user_id'];
+
+      // Update FFAppState to show typing indicator
+      FFAppState().update(() {
+        FFAppState().typingUsers.add(userId);
+      });
+
+      // Remove after 3 seconds
+      Future.delayed(Duration(seconds: 3), () {
+        FFAppState().update(() {
+          FFAppState().typingUsers.remove(userId);
+        });
+      });
+    });
+  }
+}
+```
+
+**Common Client Event Patterns:**
+
+```dart
+// Typing indicator
+channel.whisper('client-typing', data: {'user_id': 'user123'});
+
+// User stopped typing
+channel.whisper('client-stopped-typing', data: {'user_id': 'user123'});
+
+// Cursor position (for collaborative editing)
+channel.whisper('client-cursor-moved', data: {
+  'user_id': 'user123',
+  'x': 100,
+  'y': 200,
+});
+
+// User is viewing
+channel.whisper('client-viewing', data: {
+  'user_id': 'user123',
+  'page': 'profile',
+});
+
+// Custom client event
+channel.whisper('client-custom-action', data: {
+  'user_id': 'user123',
+  'action': 'highlight',
+  'element_id': 'paragraph-5',
+});
+```
+
+**Important Notes:**
+- Client events only work on **private** and **presence** channels (not public channels)
+- Event names **must** start with `client-` or will throw `ArgumentError`
+- Channel must be in `subscribed` state or will throw `ChannelException`
+- Messages are not stored and don't reach your backend
+- Perfect for temporary, high-frequency updates that don't need persistence
+
+### Example 7: Using StreamBuilder in Flutter Widgets
 
 ```dart
 import 'package:flutter/material.dart';
@@ -1019,6 +1151,28 @@ InvalidChannelNameException: Private channel name must start with "private-" pre
 ### PrivateChannel
 
 Extends `Channel` with authentication support. All `Channel` methods are available.
+
+**Additional Methods:**
+
+- `whisper(String eventName, {Map<String, dynamic>? data})` - Send client events (whisper) to other subscribed clients
+  - `eventName` must start with `"client-"` (e.g., `"client-typing"`)
+  - Only works when channel is in `subscribed` state
+  - Perfect for typing indicators, cursor positions, and ephemeral updates
+  - Throws `ArgumentError` if event name doesn't start with `"client-"`
+  - Throws `ChannelException` if channel is not subscribed
+
+**Example:**
+```dart
+final privateChannel = client.subscribeToPrivateChannel('private-chat');
+
+// Send typing indicator
+privateChannel.whisper('client-typing', data: {'user_id': 'user123'});
+
+// Listen for typing from others
+privateChannel.on('client-typing').listen((event) {
+  print('${event.data['user_id']} is typing...');
+});
+```
 
 ### EncryptedChannel
 

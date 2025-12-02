@@ -167,5 +167,72 @@ void main() {
         expect(channel.state, ChannelState.unsubscribed);
       });
     });
+
+    group('whisper (client events)', () {
+      test('should send client event with correct format', () {
+        final channel = createPrivateChannel();
+        // Manually set state to subscribed for testing
+        channel.handleSubscriptionSucceeded();
+
+        channel.whisper('client-typing', data: {
+          'user_id': 'user123',
+          'timestamp': '2024-01-01T00:00:00Z',
+        });
+
+        expect(sentMessages.length, 1);
+        final sentMessage = sentMessages[0];
+        expect(sentMessage, contains('"event":"client-typing"'));
+        expect(sentMessage, contains('"channel":"$testChannelName"'));
+        expect(sentMessage, contains('"user_id":"user123"'));
+      });
+
+      test('should send client event with empty data if not provided', () {
+        final channel = createPrivateChannel();
+        channel.handleSubscriptionSucceeded();
+
+        channel.whisper('client-cursor-moved');
+
+        expect(sentMessages.length, 1);
+        final sentMessage = sentMessages[0];
+        expect(sentMessage, contains('"event":"client-cursor-moved"'));
+        expect(sentMessage, contains('"data":{}'));
+      });
+
+      test('should throw ArgumentError if event name does not start with "client-"', () {
+        final channel = createPrivateChannel();
+        channel.handleSubscriptionSucceeded();
+
+        expect(
+          () => channel.whisper('typing', data: {'user_id': 'user123'}),
+          throwsA(isA<ArgumentError>()),
+        );
+        expect(sentMessages.length, 0);
+      });
+
+      test('should throw ChannelException if channel is not subscribed', () {
+        final channel = createPrivateChannel();
+        // Leave channel in unsubscribed state
+
+        expect(
+          () => channel.whisper('client-typing', data: {'user_id': 'user123'}),
+          throwsA(isA<ChannelException>()),
+        );
+        expect(sentMessages.length, 0);
+      });
+
+      test('should allow multiple client events with different names', () {
+        final channel = createPrivateChannel();
+        channel.handleSubscriptionSucceeded();
+
+        channel.whisper('client-typing', data: {'status': 'started'});
+        channel.whisper('client-cursor-moved', data: {'x': 100, 'y': 200});
+        channel.whisper('client-custom-event', data: {'custom': 'data'});
+
+        expect(sentMessages.length, 3);
+        expect(sentMessages[0], contains('"event":"client-typing"'));
+        expect(sentMessages[1], contains('"event":"client-cursor-moved"'));
+        expect(sentMessages[2], contains('"event":"client-custom-event"'));
+      });
+    });
   });
 }
