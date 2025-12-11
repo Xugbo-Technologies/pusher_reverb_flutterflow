@@ -502,8 +502,9 @@ void main() {
         expect(identical(instance1, instance2), isFalse);
       });
 
-      test('instance() reinitializes when auth callbacks change', () {
+      test('instance() reuses singleton when auth callbacks change', () {
         // Arrange
+        final channelFactory = (Uri uri) => mockChannel;
         void onConnected1(String? _) {}
         final authorizer1 = (String channel, String socketId) async => {'a': 'b'};
         final instance1 = ReverbClient.instance(
@@ -513,7 +514,7 @@ void main() {
           onConnected: onConnected1,
           authorizer: authorizer1,
           authEndpoint: '/old',
-          channelFactory: (_) => mockChannel,
+          channelFactory: channelFactory,
         );
 
         // Act - Provide a new callback and authorizer
@@ -526,13 +527,47 @@ void main() {
           onConnected: onConnected2,
           authorizer: authorizer2,
           authEndpoint: '/new',
-          channelFactory: (_) => mockChannel,
+          channelFactory: channelFactory,
         );
 
         // Assert
-        expect(identical(instance1, instance2), isFalse);
+        expect(identical(instance1, instance2), isTrue);
         expect(instance2.authEndpoint, '/new');
         expect(instance2.onConnected, same(onConnected2));
+        expect(instance2.authorizer, same(authorizer2));
+      });
+
+      test('instance() keeps existing channels when callbacks are updated', () async {
+        // Arrange
+        final channelFactory = (Uri uri) => mockChannel;
+        final client = ReverbClient.instance(host: 'localhost', port: 8080, appKey: 'first-key', channelFactory: channelFactory);
+
+        await client.connect();
+        final connectionMessage = jsonEncode({
+          'event': 'pusher:connection_established',
+          'data': jsonEncode({'socket_id': 'socket-1', 'activity_timeout': 30}),
+        });
+        streamController.add(connectionMessage);
+        await Future.delayed(Duration.zero);
+
+        final channel = client.subscribeToChannel('public-room');
+
+        // Act
+        void onConnected2(String? _) {}
+        final sameInstance = ReverbClient.instance(
+          host: 'localhost',
+          port: 8080,
+          appKey: 'first-key',
+          onConnected: onConnected2,
+          channelFactory: channelFactory,
+        );
+
+        // Assert
+        expect(identical(client, sameInstance), isTrue);
+        expect(sameInstance.getChannel('public-room'), same(channel));
+        expect(sameInstance.onConnected, same(onConnected2));
+
+        client.disconnect();
       });
     });
 

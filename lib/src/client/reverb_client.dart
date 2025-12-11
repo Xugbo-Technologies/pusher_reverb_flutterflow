@@ -39,10 +39,10 @@ class ReverbClient {
   final String? cluster;
 
   /// The authorizer function for private channel authentication.
-  final Authorizer? authorizer;
+  Authorizer? authorizer;
 
   /// The authentication endpoint URL for private channel authentication.
-  final String? authEndpoint;
+  String? authEndpoint;
 
   /// The custom WebSocket path for the connection.
   /// If not provided, defaults to '/app/{appKey}'.
@@ -81,19 +81,19 @@ class ReverbClient {
   bool _manualDisconnect = false;
 
   /// Callback for when the connection attempt starts.
-  final void Function()? onConnecting;
+  void Function()? onConnecting;
 
   /// Callback for when the connection is successfully established.
-  final void Function(String? socketId)? onConnected;
+  void Function(String? socketId)? onConnected;
 
   /// Callback for when the client starts attempting to reconnect.
-  final void Function()? onReconnecting;
+  void Function()? onReconnecting;
 
   /// Callback for when the connection is closed or lost.
-  final void Function()? onDisconnected;
+  void Function()? onDisconnected;
 
   /// Callback for when a connection error occurs.
-  final void Function(dynamic error)? onError;
+  void Function(dynamic error)? onError;
 
   /// A factory for creating WebSocket channels, primarily for testing.
   @visibleForTesting
@@ -237,19 +237,21 @@ class ReverbClient {
         appKey: appKey,
         apiKey: apiKey,
         cluster: cluster,
-        authorizer: authorizer,
-        authEndpoint: authEndpoint,
         wsPath: wsPath,
         useTLS: useTLS,
-        onConnecting: onConnecting,
-        onConnected: onConnected,
-        onReconnecting: onReconnecting,
-        onDisconnected: onDisconnected,
-        onError: onError,
         channelFactory: channelFactory,
       );
 
       if (!forceReplace && !shouldReplace) {
+        _instance!._updateRuntimeConfig(
+          authorizer: authorizer,
+          authEndpoint: authEndpoint,
+          onConnecting: onConnecting,
+          onConnected: onConnected,
+          onReconnecting: onReconnecting,
+          onDisconnected: onDisconnected,
+          onError: onError,
+        );
         return _instance!;
       }
 
@@ -295,15 +297,8 @@ class ReverbClient {
     String? appKey,
     String? apiKey,
     String? cluster,
-    Authorizer? authorizer,
-    String? authEndpoint,
     String? wsPath,
     bool? useTLS,
-    void Function()? onConnecting,
-    void Function(String? socketId)? onConnected,
-    void Function()? onReconnecting,
-    void Function()? onDisconnected,
-    void Function(dynamic error)? onError,
     WebSocketChannel Function(Uri uri)? channelFactory,
   }) {
     // If core connection settings change, we must recreate the client.
@@ -313,23 +308,56 @@ class ReverbClient {
         (cluster != null && cluster != existing.cluster) ||
         (wsPath != null && wsPath != existing.wsPath) ||
         (useTLS != null && useTLS != existing.useTLS) ||
-        (apiKey != null && apiKey != existing.apiKey)) {
-      return true;
-    }
-
-    // If auth or callbacks change (e.g. new token or UI context), rebuild so new hooks are used.
-    if ((authEndpoint != null && authEndpoint != existing.authEndpoint) ||
-        (authorizer != null && !identical(authorizer, existing.authorizer)) ||
-        (onConnecting != null && !identical(onConnecting, existing.onConnecting)) ||
-        (onConnected != null && !identical(onConnected, existing.onConnected)) ||
-        (onReconnecting != null && !identical(onReconnecting, existing.onReconnecting)) ||
-        (onDisconnected != null && !identical(onDisconnected, existing.onDisconnected)) ||
-        (onError != null && !identical(onError, existing.onError)) ||
+        (apiKey != null && apiKey != existing.apiKey) ||
         (channelFactory != null && !identical(channelFactory, existing.channelFactory))) {
       return true;
     }
 
     return false;
+  }
+
+  /// Updates callbacks and auth settings without rebuilding the singleton.
+  void _updateRuntimeConfig({
+    Authorizer? authorizer,
+    String? authEndpoint,
+    void Function()? onConnecting,
+    void Function(String? socketId)? onConnected,
+    void Function()? onReconnecting,
+    void Function()? onDisconnected,
+    void Function(dynamic error)? onError,
+  }) {
+    // Update callbacks if provided
+    if (onConnecting != null) {
+      this.onConnecting = onConnecting;
+    }
+    if (onConnected != null) {
+      this.onConnected = onConnected;
+    }
+    if (onReconnecting != null) {
+      this.onReconnecting = onReconnecting;
+    }
+    if (onDisconnected != null) {
+      this.onDisconnected = onDisconnected;
+    }
+    if (onError != null) {
+      this.onError = onError;
+    }
+
+    // Update auth configuration for future subscriptions and re-auth flows
+    if (authorizer != null) {
+      this.authorizer = authorizer;
+    }
+    if (authEndpoint != null) {
+      this.authEndpoint = authEndpoint;
+    }
+
+    if ((authorizer != null || authEndpoint != null) && _channels.isNotEmpty) {
+      for (final channel in _channels.values) {
+        if (channel is PrivateChannel) {
+          channel.updateAuth(authorizer: authorizer, authEndpoint: authEndpoint);
+        }
+      }
+    }
   }
 
   /// Factory constructor that throws an error to prevent direct instantiation.

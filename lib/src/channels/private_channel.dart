@@ -15,10 +15,10 @@ import 'channel.dart';
 /// an authorizer function to provide authentication headers.
 class PrivateChannel extends Channel {
   /// The authorizer function that provides authentication headers.
-  final Authorizer authorizer;
+  Authorizer authorizer;
 
   /// The authentication endpoint URL for private channel authentication.
-  final String authEndpoint;
+  String authEndpoint;
 
   /// The socket ID used for authentication.
   String _socketId;
@@ -145,6 +145,17 @@ class PrivateChannel extends Channel {
   @internal
   void updateSocketId(String newSocketId) {
     _socketId = newSocketId;
+  }
+
+  /// Updates auth configuration used during (re)subscription.
+  @internal
+  void updateAuth({Authorizer? authorizer, String? authEndpoint}) {
+    if (authorizer != null) {
+      this.authorizer = authorizer;
+    }
+    if (authEndpoint != null && authEndpoint.isNotEmpty) {
+      this.authEndpoint = authEndpoint;
+    }
   }
 
   /// Sends a client event (whisper) to other subscribed clients.
