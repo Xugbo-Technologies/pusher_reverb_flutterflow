@@ -537,17 +537,25 @@ class ReverbClient {
     _reconnectAttempts++;
 
     // Calculate delay with exponential backoff: 2^attempt seconds, capped at max
-    final delay = Duration(seconds: (pow(2, _reconnectAttempts) as int).clamp(1, _maxReconnectDelay));
+    // The exponent is capped: 2^64 wraps to 0 on Dart ints, which would clamp
+    // to a 1s delay after a long outage.
+    final delay = Duration(seconds: (pow(2, min(_reconnectAttempts, 5)) as int).clamp(1, _maxReconnectDelay));
 
     _setConnectionState(ConnectionState.reconnecting);
     onReconnecting?.call();
 
     await Future.delayed(delay);
 
+    // Something else may have reconnected or disconnected during the wait.
+    if (_manualDisconnect || _currentConnectionState != ConnectionState.reconnecting) {
+      return;
+    }
+
     try {
+      // The attempt counter is reset when the server confirms the connection
+      // (pusher:connection_established), not here: connect() returns as soon
+      // as the socket is opened, before it is known whether it succeeds.
       await connect();
-      // Reset attempt counter on successful connection
-      _reconnectAttempts = 0;
     } catch (e) {
       // Error is already handled by connect() method
       // Attempt to reconnect again
@@ -571,6 +579,15 @@ class ReverbClient {
 
       final uri = _constructWebSocketUri();
 
+      // Retire the previous socket first, so its late close cannot start a
+      // second reconnect chain alongside this connection.
+      final previousSubscription = _subscription;
+      final previousChannel = _channel;
+      _subscription = null;
+      _channel = null;
+      unawaited(previousSubscription?.cancel());
+      unawaited(previousChannel?.sink.close());
+
       // Create WebSocket with API key headers if provided
       if (apiKey != null) {
         final headers = <String, dynamic>{'Authorization': 'Bearer $apiKey', ..._resolvedConfig.additionalHeaders};
@@ -578,6 +595,10 @@ class ReverbClient {
       } else {
         _channel = channelFactory != null ? channelFactory!(uri) : IOWebSocketChannel.connect(uri);
       }
+
+      // A failed handshake is reported through the stream below; without a
+      // listener, the ready future would also raise it as an unhandled error.
+      unawaited(_channel!.ready.catchError((Object _) {}));
 
       _subscription = _channel?.stream.listen(
         _handleMessage,
@@ -630,8 +651,8 @@ class ReverbClient {
     _reconnectAttempts = 0;
     socketId = null;
 
-    _subscription?.cancel();
-    _channel?.sink.close();
+    // Leave the channels while the socket is still open: an unsubscribe
+    // written after the sink is closed throws.
     // Safe clear: create a copy of keys to avoid concurrent modification
     final channelNames = _channels.keys.toList();
     for (final channelName in channelNames) {
@@ -642,6 +663,11 @@ class ReverbClient {
       }
     }
     _channels.clear();
+
+    _subscription?.cancel();
+    _channel?.sink.close();
+    _subscription = null;
+    _channel = null;
     _setConnectionState(ConnectionState.disconnected);
     onDisconnected?.call();
   }
@@ -657,7 +683,7 @@ class ReverbClient {
     final channel = Channel(name: channelName, sendMessage: _sendMessage);
 
     _channels[channelName] = channel;
-    channel.subscribe();
+    _startSubscription(channel);
 
     return channel;
   }
@@ -694,7 +720,7 @@ class ReverbClient {
     final channel = PrivateChannel(name: channelName, authorizer: enhancedAuthorizer, authEndpoint: authEndpoint!, socketId: socketId!, sendMessage: _sendMessage);
 
     _channels[channelName] = channel;
-    channel.subscribe();
+    _startSubscription(channel);
 
     return channel;
   }
@@ -736,7 +762,7 @@ class ReverbClient {
     final channel = PresenceChannel(name: channelName, authorizer: enhancedAuthorizer, authEndpoint: authEndpoint!, socketId: socketId!, sendMessage: _sendMessage, channelData: channelData);
 
     _channels[channelName] = channel;
-    channel.subscribe();
+    _startSubscription(channel);
 
     return channel;
   }
@@ -842,10 +868,10 @@ class ReverbClient {
   /// Re-activates a channel if it was unsubscribed or unsubscribing.
   void _reactivateChannelIfNeeded(Channel channel) {
     if (channel.state == ChannelState.unsubscribed) {
-      channel.subscribe();
+      _startSubscription(channel);
     } else if (channel.state == ChannelState.unsubscribing) {
       channel.resetForReconnection();
-      channel.subscribe();
+      _startSubscription(channel);
     }
   }
 
@@ -872,9 +898,17 @@ class ReverbClient {
           channel.updateSocketId(currentSocketId);
         }
         channel.resetForReconnection();
-        channel.subscribe();
+        _startSubscription(channel);
       }
     }
+  }
+
+  /// Starts a channel subscription and reports a failure (such as a rejected
+  /// private channel auth) to [onError] instead of leaving it unhandled.
+  void _startSubscription(Channel channel) {
+    channel.subscribe().catchError((Object error) {
+      onError?.call(error);
+    });
   }
 
   /// Responds to server ping events to keep the connection alive.
@@ -923,6 +957,22 @@ class ReverbClient {
     }
   }
 
+  /// Decodes an event's `data`, which Reverb sends as a JSON string.
+  Map<String, dynamic> _decodeEventData(dynamic data) {
+    if (data is Map<String, dynamic>) return data;
+    if (data is String && data.isNotEmpty) {
+      final decoded = jsonDecode(data);
+      if (decoded is Map<String, dynamic>) return decoded;
+    }
+    return <String, dynamic>{};
+  }
+
+  /// The channel an internal event is about. The Pusher protocol, and Reverb,
+  /// put it at the top level of the frame; older servers sent it in `data`.
+  String? _internalEventChannel(Map<String, dynamic> frame, Map<String, dynamic> data) {
+    return frame['channel'] as String? ?? data['channel'] as String?;
+  }
+
   void _handleMessage(dynamic message) {
     final decodedMessage = jsonDecode(message as String);
     final event = decodedMessage['event'];
@@ -937,8 +987,8 @@ class ReverbClient {
       onConnected?.call(socketId);
       _resubscribeToChannels();
     } else if (event == 'pusher_internal:subscription_succeeded') {
-      final channelData = jsonDecode(data as String);
-      final channelName = channelData['channel'] as String?;
+      final channelData = _decodeEventData(data);
+      final channelName = _internalEventChannel(decodedMessage, channelData);
       if (channelName != null) {
         final channel = _channels[channelName];
         // Pass subscription data for presence channels
@@ -949,8 +999,8 @@ class ReverbClient {
         }
       }
     } else if (event == 'pusher_internal:unsubscription_succeeded') {
-      final channelData = jsonDecode(data as String);
-      final channelName = channelData['channel'] as String?;
+      final channelData = _decodeEventData(data);
+      final channelName = _internalEventChannel(decodedMessage, channelData);
       if (channelName != null) {
         final channel = _channels[channelName];
         channel?.handleUnsubscriptionSucceeded();
