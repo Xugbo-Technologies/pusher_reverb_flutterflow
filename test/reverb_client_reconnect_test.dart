@@ -8,11 +8,15 @@ import 'package:http/testing.dart';
 import 'package:pusher_reverb_flutter/pusher_reverb_flutter.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
-/// A socket that either answers the Reverb handshake or fails to connect.
+/// How the fake server treats a new socket.
+enum _Server { up, refusing, hanging }
+
+/// A socket that answers the Reverb handshake, fails to connect, or hangs.
 class _FakeSocket implements WebSocketChannel {
-  _FakeSocket({required bool reachable, required int socketNumber}) {
+  _FakeSocket({required _Server server, required int socketNumber, this.answersPings = true}) {
     scheduleMicrotask(() {
-      if (reachable) {
+      if (server == _Server.hanging) return;
+      if (server == _Server.up) {
         _ready.complete();
         _incoming.add(jsonEncode({
           'event': 'pusher:connection_established',
@@ -30,6 +34,11 @@ class _FakeSocket implements WebSocketChannel {
   final _ready = Completer<void>();
   bool closedByClient = false;
   final sent = <String>[];
+
+  /// Whether the server answers pusher:ping; a half-open socket does not.
+  bool answersPings;
+
+  List<String> get sentEvents => sent.map((m) => jsonDecode(m)['event'] as String).toList();
 
   /// The server sends a raw frame.
   void serverSends(Map<String, dynamic> frame) => _incoming.add(jsonEncode(frame));
@@ -70,6 +79,9 @@ class _FakeSink implements WebSocketSink {
     // Like a real socket sink, writing after close throws.
     if (_socket.closedByClient) throw StateError('Cannot add event after closing');
     _socket.sent.add(event as String);
+    if (_socket.answersPings && jsonDecode(event)['event'] == 'pusher:ping') {
+      scheduleMicrotask(() => _socket.serverSends({'event': 'pusher:pong', 'data': '{}'}));
+    }
   }
 
   @override
@@ -90,7 +102,8 @@ class _FakeSink implements WebSocketSink {
 void main() {
   late FakeAsync clock;
   late List<_FakeSocket> sockets;
-  late bool reachable;
+  late _Server server;
+  late bool answersPings;
 
   ReverbClient newClient({void Function(dynamic error)? onError}) {
     return ReverbClient.forTesting(
@@ -102,7 +115,7 @@ void main() {
       authorizer: (channelName, socketId) async => {'Authorization': 'Bearer t'},
       onError: onError,
       channelFactory: (_) {
-        final socket = _FakeSocket(reachable: reachable, socketNumber: sockets.length + 1);
+        final socket = _FakeSocket(server: server, socketNumber: sockets.length + 1, answersPings: answersPings);
         sockets.add(socket);
         return socket;
       },
@@ -126,11 +139,12 @@ void main() {
   setUp(() {
     clock = FakeAsync();
     sockets = [];
-    reachable = true;
+    server = _Server.up;
+    answersPings = true;
   });
 
   test('backs off between attempts while the server is unreachable', () async {
-    reachable = false;
+    server = _Server.refusing;
     final client = clock.run((_) => newClient());
     clock.run((_) => unawaited(client.connect()));
 
@@ -142,7 +156,7 @@ void main() {
   });
 
   test('a long outage keeps the 30s ceiling instead of wrapping to 1s', () async {
-    reachable = false;
+    server = _Server.refusing;
     final client = clock.run((_) => newClient());
     clock.run((_) => unawaited(client.connect()));
     await elapse(const Duration(minutes: 40));
@@ -155,13 +169,13 @@ void main() {
   });
 
   test('the backoff restarts after a connection succeeds', () async {
-    reachable = false;
+    server = _Server.refusing;
     final client = clock.run((_) => newClient());
     clock.run((_) => unawaited(client.connect()));
     await elapse(const Duration(seconds: 70));
     final attemptsWhileDown = sockets.length;
 
-    reachable = true;
+    server = _Server.up;
     await elapse(const Duration(seconds: 31));
     expect(client.connectionState, ConnectionState.connected);
 
@@ -189,47 +203,6 @@ void main() {
     expect(sockets.length, 2);
     expect(client.connectionState, ConnectionState.connected);
     client.disconnect();
-  });
-
-  test('a reconnect that finds the client already connected does nothing', () async {
-    final client = clock.run((_) => newClient());
-    clock.run((_) => unawaited(client.connect()));
-    await elapse(const Duration(seconds: 1));
-
-    sockets.last.drop(); // schedules a reconnect in 2s
-    clock.run((_) => unawaited(client.connect())); // something else reconnects first
-    await elapse(const Duration(seconds: 5));
-
-    expect(sockets.length, 2);
-    expect(client.connectionState, ConnectionState.connected);
-    client.disconnect();
-  });
-
-  test('a private channel auth failure is reported to onError, not thrown away', () async {
-    final errors = <dynamic>[];
-    await http.runWithClient(() async {
-      final client = clock.run((_) => newClient(onError: errors.add));
-      clock.run((_) => unawaited(client.connect()));
-      await elapse(const Duration(seconds: 1));
-
-      clock.run((_) => client.subscribeToPrivateChannel('private-user.1'));
-      await elapse(const Duration(seconds: 1));
-
-      expect(
-        errors.whereType<AuthenticationException>().map((e) => e.statusCode),
-        [401],
-      );
-
-      // The same goes for the automatic resubscribe after a reconnect.
-      errors.clear();
-      clock.run((_) => client.subscribeToPrivateChannel('private-user.1'));
-      await elapse(const Duration(milliseconds: 100));
-      sockets.last.drop();
-      await elapse(const Duration(seconds: 3));
-
-      expect(errors.whereType<AuthenticationException>(), isNotEmpty);
-      client.disconnect();
-    }, () => authAnswering(401));
   });
 
   test('subscription_succeeded as Reverb sends it marks the channel subscribed', () async {
@@ -270,12 +243,267 @@ void main() {
   });
 
   test('a failed handshake is not also raised as an unhandled error', () async {
-    reachable = false;
+    server = _Server.refusing;
     final client = clock.run((_) => newClient());
     clock.run((_) => unawaited(client.connect()));
     await elapse(const Duration(seconds: 1));
 
     expect(client.connectionState, isNot(ConnectionState.connected));
+    client.disconnect();
+  });
+
+  test('a pending reconnect does nothing when something else reconnected first', () async {
+    final client = clock.run((_) => newClient());
+    clock.run((_) => unawaited(client.connect()));
+    await elapse(const Duration(seconds: 1));
+
+    sockets.last.drop();
+    await elapse(const Duration(milliseconds: 100));
+    expect(client.connectionState, ConnectionState.reconnecting); // waiting 2s
+
+    clock.run((_) => unawaited(client.connect())); // e.g. the app on resume
+    await elapse(const Duration(seconds: 5));
+
+    expect(sockets.length, 2);
+    expect(client.connectionState, ConnectionState.connected);
+    client.disconnect();
+  });
+
+  test('a private channel auth failure is reported to onError, not thrown away', () async {
+    final errors = <dynamic>[];
+    await http.runWithClient(() async {
+      final client = clock.run((_) => newClient(onError: errors.add));
+      clock.run((_) => unawaited(client.connect()));
+      await elapse(const Duration(seconds: 1));
+
+      clock.run((_) => client.subscribeToPrivateChannel('private-user.1'));
+      await elapse(const Duration(seconds: 1));
+
+      expect(errors.whereType<AuthenticationException>().map((e) => e.statusCode), [401]);
+      client.disconnect();
+    }, () => authAnswering(401));
+  });
+
+  test('a 401 on the automatic resubscribe after a reconnect reaches onError', () async {
+    final errors = <dynamic>[];
+    var status = 200;
+    await http.runWithClient(() async {
+      final client = clock.run((_) => newClient(onError: errors.add));
+      clock.run((_) => unawaited(client.connect()));
+      await elapse(const Duration(seconds: 1));
+      final channel = clock.run((_) => client.subscribeToPrivateChannel('private-user.1'));
+      await elapse(const Duration(milliseconds: 100));
+      clock.run((_) => sockets.last.serverSends({'event': 'pusher_internal:subscription_succeeded', 'data': '{}', 'channel': 'private-user.1'}));
+      await elapse(const Duration(milliseconds: 100));
+      expect(channel.state, ChannelState.subscribed);
+
+      status = 401;
+      sockets.last.drop();
+      await elapse(const Duration(seconds: 3));
+
+      expect(sockets.length, 2);
+      expect(errors.whereType<AuthenticationException>().map((e) => e.statusCode), [401]);
+      client.disconnect();
+    }, () => MockClient((request) async => http.Response(status == 200 ? jsonEncode({'auth': 'key:sig'}) : '{}', status)));
+  });
+
+  test('an auth request from before a reconnect cannot undo the resubscribe on the new socket', () async {
+    final errors = <dynamic>[];
+    var requests = 0;
+    await http.runWithClient(() async {
+      final client = clock.run((_) => newClient(onError: errors.add));
+      clock.run((_) => unawaited(client.connect()));
+      await elapse(const Duration(seconds: 1));
+
+      // The first auth is slow and fails; the one for the new socket succeeds.
+      final channel = clock.run((_) => client.subscribeToPrivateChannel('private-user.1'));
+      await elapse(const Duration(milliseconds: 100));
+      sockets.last.drop(); // reconnects 2s later, while the first auth is in flight
+      await elapse(const Duration(seconds: 8));
+
+      expect(requests, 2);
+      expect(sockets.last.sentEvents, contains('pusher:subscribe'));
+      expect(channel.state, ChannelState.subscribing); // waiting for the server
+      expect(errors.whereType<AuthenticationException>(), isEmpty);
+      client.disconnect();
+    }, () => MockClient((request) async {
+          requests++;
+          final first = requests == 1;
+          await Future<void>.delayed(const Duration(seconds: 3));
+          return first ? http.Response('{}', 500) : http.Response(jsonEncode({'auth': 'key:sig'}), 200);
+        }));
+  });
+
+  test('after a quiet period the client pings, and a pong keeps the socket', () async {
+    final client = clock.run((_) => newClient());
+    clock.run((_) => unawaited(client.connect()));
+    await elapse(const Duration(seconds: 29));
+    expect(sockets.last.sentEvents, isNot(contains('pusher:ping')));
+
+    await elapse(const Duration(seconds: 2)); // activity_timeout is 30s
+    expect(sockets.last.sentEvents, contains('pusher:ping'));
+
+    await elapse(const Duration(minutes: 3));
+    expect(sockets.length, 1);
+    expect(client.connectionState, ConnectionState.connected);
+    client.disconnect();
+  });
+
+  test('traffic from the server postpones the ping', () async {
+    final client = clock.run((_) => newClient());
+    clock.run((_) => unawaited(client.connect()));
+    for (var i = 0; i < 4; i++) {
+      await elapse(const Duration(seconds: 20));
+      clock.run((_) => sockets.last.serverSends({'event': 'pusher:ping', 'data': '{}'}));
+    }
+    expect(sockets.last.sentEvents, isNot(contains('pusher:ping')));
+    client.disconnect();
+  });
+
+  test('a socket that stops answering is replaced exactly once', () async {
+    answersPings = false;
+    final client = clock.run((_) => newClient());
+    clock.run((_) => unawaited(client.connect()));
+    answersPings = true;
+
+    // Ping at 30s, no pong by 60s, a last ping with 5s grace, reconnect 2s later.
+    await elapse(const Duration(seconds: 70));
+
+    expect(sockets.length, 2);
+    expect(sockets.first.closedByClient, isTrue);
+    expect(client.connectionState, ConnectionState.connected);
+    client.disconnect();
+  });
+
+  test('no ping is sent after disconnecting', () async {
+    final client = clock.run((_) => newClient());
+    clock.run((_) => unawaited(client.connect()));
+    await elapse(const Duration(seconds: 1));
+    client.disconnect();
+    final sentBefore = sockets.last.sent.length;
+
+    await elapse(const Duration(minutes: 2));
+
+    expect(sockets.last.sent.length, sentBefore);
+    expect(sockets.length, 1);
+  });
+
+  test('a handshake that never completes is abandoned and retried with backoff', () async {
+    server = _Server.hanging;
+    final client = clock.run((_) => newClient());
+    clock.run((_) => unawaited(client.connect()));
+    await elapse(const Duration(seconds: 14));
+    expect(sockets.length, 1);
+
+    server = _Server.up;
+    await elapse(const Duration(seconds: 4)); // 15s timeout, then 2s backoff
+
+    expect(sockets.length, 2);
+    expect(sockets.first.closedByClient, isTrue);
+    expect(client.connectionState, ConnectionState.connected);
+    client.disconnect();
+  });
+
+  test('checkConnection cuts a pending backoff short', () async {
+    server = _Server.refusing;
+    final client = clock.run((_) => newClient());
+    clock.run((_) => unawaited(client.connect()));
+    await elapse(const Duration(seconds: 40)); // now waiting up to 30s
+    final attempts = sockets.length;
+
+    server = _Server.up;
+    clock.run((_) => client.checkConnection());
+    await elapse(const Duration(seconds: 1));
+
+    expect(sockets.length, attempts + 1);
+    expect(client.connectionState, ConnectionState.connected);
+    client.disconnect();
+  });
+
+  test('checkConnection on a connected socket pings it right away', () async {
+    answersPings = false;
+    final client = clock.run((_) => newClient());
+    clock.run((_) => unawaited(client.connect()));
+    await elapse(const Duration(seconds: 5));
+
+    clock.run((_) => client.checkConnection());
+    await elapse(const Duration(milliseconds: 100));
+    expect(sockets.first.sentEvents, contains('pusher:ping'));
+
+    // The socket is dead: replaced ~37s later instead of after a full quiet period.
+    answersPings = true;
+    await elapse(const Duration(seconds: 40));
+    expect(sockets.length, 2);
+    client.disconnect();
+  });
+
+  test('a pong that arrives right after the timeout, as after the app was frozen, keeps the socket', () async {
+    answersPings = false;
+    final client = clock.run((_) => newClient());
+    clock.run((_) => unawaited(client.connect()));
+    await elapse(const Duration(seconds: 61)); // ping at 30s, timeout at 60s
+
+    clock.run((_) => sockets.last.serverSends({'event': 'pusher:pong', 'data': '{}'}));
+    await elapse(const Duration(seconds: 10));
+
+    expect(sockets.length, 1);
+    expect(client.connectionState, ConnectionState.connected);
+    client.disconnect();
+  });
+
+  test('an auth request in flight when the socket drops cannot fail the channel for the new socket', () async {
+    var requests = 0;
+    await http.runWithClient(() async {
+      final client = clock.run((_) => newClient());
+      clock.run((_) => unawaited(client.connect()));
+      await elapse(const Duration(seconds: 1));
+
+      final channel = clock.run((_) => client.subscribeToPrivateChannel('private-user.1'));
+      await elapse(const Duration(milliseconds: 100));
+      sockets.last.drop();
+      await elapse(const Duration(seconds: 1)); // the first auth fails during the outage
+      await elapse(const Duration(seconds: 3)); // reconnect
+
+      expect(sockets.length, 2);
+      expect(requests, 2);
+      expect(sockets.last.sentEvents, contains('pusher:subscribe'));
+      expect(channel.state, ChannelState.subscribing); // waiting for the server
+      client.disconnect();
+    }, () => MockClient((request) async {
+          requests++;
+          if (requests == 1) {
+            await Future<void>.delayed(const Duration(milliseconds: 500));
+            throw http.ClientException('network is down');
+          }
+          return http.Response(jsonEncode({'auth': 'key:sig'}), 200);
+        }));
+  });
+
+  test('checkConnection replaces a handshake that has been hanging', () async {
+    server = _Server.hanging;
+    final client = clock.run((_) => newClient());
+    clock.run((_) => unawaited(client.connect()));
+    await elapse(const Duration(seconds: 5));
+
+    server = _Server.up;
+    clock.run((_) => client.checkConnection()); // e.g. the app resumes
+    await elapse(const Duration(seconds: 1));
+
+    expect(sockets.length, 2);
+    expect(client.connectionState, ConnectionState.connected);
+    client.disconnect();
+  });
+
+  test('checkConnection leaves a handshake that just started alone', () async {
+    final client = clock.run((_) => newClient());
+    server = _Server.hanging;
+    clock.run((_) => unawaited(client.connect()));
+    await elapse(const Duration(milliseconds: 500));
+
+    clock.run((_) => client.checkConnection());
+    await elapse(const Duration(milliseconds: 500));
+
+    expect(sockets.length, 1);
     client.disconnect();
   });
 }

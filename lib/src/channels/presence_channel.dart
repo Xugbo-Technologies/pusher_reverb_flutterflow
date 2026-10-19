@@ -52,22 +52,22 @@ class PresenceChannel extends PrivateChannel {
       return;
     }
 
-    setState(ChannelState.subscribing);
+    final attempt = beginSubscribeAttempt();
 
     try {
       // Get authentication headers from the authorizer
       final authHeaders = await authorizer(name, socketId);
 
-      // Check if channel is still subscribing (not unsubscribed during auth)
-      if (state != ChannelState.subscribing) {
+      // Check if this attempt is still live (not unsubscribed or restarted)
+      if (!isCurrentSubscribeAttempt(attempt)) {
         return;
       }
 
       // Send authentication request to the server with channel data
       final authResponse = await _authenticateWithServerAndChannelData(authHeaders);
 
-      // Check again if channel is still subscribing before sending message
-      if (state != ChannelState.subscribing) {
+      // Check again before sending the subscription for this socket
+      if (!isCurrentSubscribeAttempt(attempt)) {
         return;
       }
 
@@ -79,12 +79,11 @@ class PresenceChannel extends PrivateChannel {
 
       sendMessage(_encodeMessage(message));
     } catch (e) {
-      // Only update state if still subscribing (not already unsubscribed)
-      if (state == ChannelState.subscribing) {
+      // Only a live attempt's failure counts; an older one's is ignored
+      if (isCurrentSubscribeAttempt(attempt)) {
         setState(ChannelState.unsubscribed);
         rethrow;
       }
-      // If already unsubscribed, silently ignore the error
     }
   }
 

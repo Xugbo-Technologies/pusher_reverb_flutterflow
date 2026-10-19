@@ -26,6 +26,27 @@ class PrivateChannel extends Channel {
   /// Latest socket ID assigned by the server.
   String get socketId => _socketId;
 
+  int _subscribeAttempt = 0;
+
+  /// Starts a new subscribe attempt. A reconnect starts a new one, so an auth
+  /// request still in flight from an older attempt cannot change the state.
+  @protected
+  int beginSubscribeAttempt() {
+    setState(ChannelState.subscribing);
+    return ++_subscribeAttempt;
+  }
+
+  /// Ends the live subscribe attempt without changing the state, for when its
+  /// socket is lost: the client starts a new attempt on the next socket.
+  @internal
+  void invalidateSubscribeAttempt() {
+    _subscribeAttempt++;
+  }
+
+  /// Whether [attempt] is still the channel's live subscribe attempt.
+  @protected
+  bool isCurrentSubscribeAttempt(int attempt) => attempt == _subscribeAttempt && state == ChannelState.subscribing;
+
   /// Creates a new PrivateChannel instance.
   ///
   /// [name] The name of the private channel (must start with "private-").
@@ -50,22 +71,22 @@ class PrivateChannel extends Channel {
       return;
     }
 
-    setState(ChannelState.subscribing);
+    final attempt = beginSubscribeAttempt();
 
     try {
       // Get authentication headers from the authorizer
       final authHeaders = await authorizer(name, socketId);
 
-      // Check if channel is still subscribing (not unsubscribed during auth)
-      if (state != ChannelState.subscribing) {
+      // Check if this attempt is still live (not unsubscribed or restarted)
+      if (!isCurrentSubscribeAttempt(attempt)) {
         return;
       }
 
       // Send authentication request to the server
       final authKey = await _authenticateWithServer(authHeaders);
 
-      // Check again if channel is still subscribing before sending message
-      if (state != ChannelState.subscribing) {
+      // Check again before sending the subscription for this socket
+      if (!isCurrentSubscribeAttempt(attempt)) {
         return;
       }
 
@@ -77,12 +98,11 @@ class PrivateChannel extends Channel {
 
       sendMessage(_encodeMessage(message));
     } catch (e) {
-      // Only update state if still subscribing (not already unsubscribed)
-      if (state == ChannelState.subscribing) {
+      // Only a live attempt's failure counts; an older one's is ignored
+      if (isCurrentSubscribeAttempt(attempt)) {
         setState(ChannelState.unsubscribed);
         rethrow;
       }
-      // If already unsubscribed, silently ignore the error
     }
   }
 

@@ -80,6 +80,33 @@ class ReverbClient {
   /// Flag to track if disconnect was manual (to prevent auto-reconnect).
   bool _manualDisconnect = false;
 
+  /// How long the connection may be quiet before the client pings the server
+  /// (the server's activity_timeout, as the Pusher protocol describes).
+  Duration _activityTimeout = const Duration(seconds: 30);
+
+  /// How long to wait for a reply to a ping before giving up on the socket.
+  static const Duration _pongTimeout = Duration(seconds: 30);
+
+  /// How long a new socket may take to complete the Pusher handshake.
+  static const Duration _handshakeTimeout = Duration(seconds: 15);
+
+  /// After the pong timeout, a last ping gets this long. A timer that fires
+  /// late (the app was frozen) can run before the pong already waiting on
+  /// the socket is read; the grace lets that pong through.
+  static const Duration _pongGrace = Duration(seconds: 5);
+
+  /// A handshake younger than this is left alone by [checkConnection].
+  static const Duration _freshHandshake = Duration(seconds: 3);
+
+  Timer? _activityTimer;
+  Timer? _pongTimer;
+  Timer? _handshakeTimer;
+  bool _handshakeIsFresh = false;
+  Timer? _freshHandshakeTimer;
+
+  /// The wait before the next reconnect attempt; [checkConnection] ends it early.
+  Completer<void>? _reconnectWait;
+
   /// Callback for when the connection attempt starts.
   void Function()? onConnecting;
 
@@ -544,7 +571,13 @@ class ReverbClient {
     _setConnectionState(ConnectionState.reconnecting);
     onReconnecting?.call();
 
-    await Future.delayed(delay);
+    final wait = _reconnectWait = Completer<void>();
+    final waitTimer = Timer(delay, () {
+      if (!wait.isCompleted) wait.complete();
+    });
+    await wait.future;
+    waitTimer.cancel();
+    if (identical(_reconnectWait, wait)) _reconnectWait = null;
 
     // Something else may have reconnected or disconnected during the wait.
     if (_manualDisconnect || _currentConnectionState != ConnectionState.reconnecting) {
@@ -585,6 +618,8 @@ class ReverbClient {
       final previousChannel = _channel;
       _subscription = null;
       _channel = null;
+      _stopLivenessTimers();
+      if (previousChannel != null) _invalidateSubscribeAttempts();
       unawaited(previousSubscription?.cancel());
       unawaited(previousChannel?.sink.close());
 
@@ -609,12 +644,25 @@ class ReverbClient {
           onError?.call(exception);
         },
         onDone: () {
+          _stopLivenessTimers();
+          _invalidateSubscribeAttempts();
           _setConnectionState(ConnectionState.disconnected);
           onDisconnected?.call();
           // Trigger automatic reconnection
           _reconnect();
         },
       );
+
+      _handshakeIsFresh = true;
+      _freshHandshakeTimer = Timer(_freshHandshake, () => _handshakeIsFresh = false);
+
+      // A socket whose handshake never completes is abandoned and retried.
+      final socket = _channel;
+      _handshakeTimer = Timer(_handshakeTimeout, () {
+        if (identical(_channel, socket) && _currentConnectionState != ConnectionState.connected) {
+          _abandonSocket();
+        }
+      });
     } catch (e) {
       // Wrap all connection errors in ConnectionException
       final exception = e is PusherException ? e : ConnectionException('Failed to connect to server', cause: e);
@@ -644,12 +692,99 @@ class ReverbClient {
     return Uri.parse('$scheme://$host:$port$normalizedPath');
   }
 
+  /// Checks the connection now, for example when the app returns to the
+  /// foreground: pings a connected socket (and replaces it if it does not
+  /// answer), or ends a pending reconnect wait so the next attempt starts now.
+  void checkConnection() {
+    if (_manualDisconnect) return;
+    switch (_currentConnectionState) {
+      case ConnectionState.connected:
+        _sendPing();
+      case ConnectionState.connecting:
+        // A handshake that has been going for a while is likely stuck (the
+        // network changed while the app was away): start over now.
+        if (_channel != null && !_handshakeIsFresh) {
+          _abandonSocket();
+          _endReconnectWait();
+        }
+      case ConnectionState.reconnecting:
+        _endReconnectWait();
+      default:
+        break;
+    }
+  }
+
+  void _endReconnectWait() {
+    final wait = _reconnectWait;
+    if (wait != null && !wait.isCompleted) wait.complete();
+  }
+
+  /// Ends the subscribe attempts of the lost socket: their auth answers must
+  /// neither fail the channels nor send a subscription for the old socket.
+  void _invalidateSubscribeAttempts() {
+    for (final channel in _channels.values) {
+      if (channel is PrivateChannel && channel.state == ChannelState.subscribing) {
+        channel.invalidateSubscribeAttempt();
+      }
+    }
+  }
+
+  void _restartActivityTimer() {
+    _activityTimer?.cancel();
+    _activityTimer = Timer(_activityTimeout, _sendPing);
+  }
+
+  void _sendPing() {
+    if (_channel == null) return;
+    _sendMessage(jsonEncode({'event': 'pusher:ping', 'data': {}}));
+    _pongTimer ??= Timer(_pongTimeout, _onPongTimeout);
+  }
+
+  void _onPongTimeout() {
+    // One last ping with a short grace before giving up on the socket.
+    _sendMessage(jsonEncode({'event': 'pusher:ping', 'data': {}}));
+    _pongTimer = Timer(_pongGrace, _abandonSocket);
+  }
+
+  void _stopLivenessTimers() {
+    _activityTimer?.cancel();
+    _pongTimer?.cancel();
+    _handshakeTimer?.cancel();
+    _freshHandshakeTimer?.cancel();
+    _activityTimer = null;
+    _pongTimer = null;
+    _handshakeTimer = null;
+    _freshHandshakeTimer = null;
+    _handshakeIsFresh = false;
+  }
+
+  /// Gives up on a socket that stopped answering or never finished its
+  /// handshake, and reconnects with the usual backoff.
+  void _abandonSocket() {
+    _stopLivenessTimers();
+    _invalidateSubscribeAttempts();
+    final subscription = _subscription;
+    final channel = _channel;
+    _subscription = null;
+    _channel = null;
+    unawaited(subscription?.cancel());
+    unawaited(channel?.sink.close());
+    if (_manualDisconnect) return;
+
+    _setConnectionState(ConnectionState.disconnected);
+    onDisconnected?.call();
+    _reconnect();
+  }
+
   /// Closes the connection to the Reverb server.
   void disconnect() {
     // Mark this as a manual disconnect to prevent auto-reconnect
     _manualDisconnect = true;
     _reconnectAttempts = 0;
     socketId = null;
+    _stopLivenessTimers();
+    final wait = _reconnectWait;
+    if (wait != null && !wait.isCompleted) wait.complete();
 
     // Leave the channels while the socket is still open: an unsubscribe
     // written after the sink is closed throws.
@@ -974,6 +1109,11 @@ class ReverbClient {
   }
 
   void _handleMessage(dynamic message) {
+    // Any traffic from the server shows the socket is alive.
+    _pongTimer?.cancel();
+    _pongTimer = null;
+    _restartActivityTimer();
+
     final decodedMessage = jsonDecode(message as String);
     final event = decodedMessage['event'];
     final data = decodedMessage['data'];
@@ -981,6 +1121,15 @@ class ReverbClient {
     if (event == 'pusher:connection_established') {
       final connectionData = jsonDecode(data as String);
       socketId = connectionData['socket_id'] as String?;
+      _handshakeTimer?.cancel();
+      _handshakeTimer = null;
+      // Ping after the server's activity timeout, but often enough for
+      // proxies that close idle sockets (Cloudflare does after 100s).
+      final activityTimeout = connectionData['activity_timeout'];
+      if (activityTimeout is int && activityTimeout > 0) {
+        _activityTimeout = Duration(seconds: min(activityTimeout, 60));
+      }
+      _restartActivityTimer();
       // Reset reconnection counter on successful connection
       _reconnectAttempts = 0;
       _setConnectionState(ConnectionState.connected);
